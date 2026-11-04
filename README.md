@@ -55,7 +55,7 @@ This project was completed as part of **DataFest 2025** by the team **"Data Girl
    Open `Commercial_Leasing_Market_Analysis.Rmd` in RStudio.
 
 4. **Run the full report**
-   Knit the `.Rmd` file to regenerate all charts and findings (requires the original Savills datasets placed in a `/data` folder).
+   Knit the `.Rmd` file to regenerate all charts and findings (requires the original Savills datasets).
 
 ## 7. What I would Improve
 - Industry classification relied on keyword matching rather than a standardized industry code. Therefore, some leases were excluded for not matching a pattern
