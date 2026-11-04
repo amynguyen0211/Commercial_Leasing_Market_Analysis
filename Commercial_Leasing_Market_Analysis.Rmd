@@ -1,0 +1,255 @@
+---
+title: 'Commercial Leasing Market Analysis '
+subtitle: DataFest 2025
+output: pdf_document
+---
+
+# 1. Commercial Leasing Trends in Leading Cities
+
+```{r}
+library(tidyverse)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(broom)
+
+# Load data
+leases <- read.csv("datasets/Leases.csv")
+
+pre_covid_years <- c(2018, 2019)
+post_covid_years <- c(2022, 2023, 2024)
+
+leases_clean_cities <- leases %>%
+  filter(!is.na(leasedSF), !is.na(city), !is.na(state), !is.na(overall_rent))
+
+# Top 2 cities per state, by total leasing activity
+top_cities <- leases_clean_cities %>%
+  group_by(state, city) %>%
+  summarise(total_leasing = sum(leasedSF, na.rm = TRUE), .groups = "drop") %>%
+  arrange(state, desc(total_leasing)) %>%
+  group_by(state) %>%
+  slice_head(n = 2)
+
+filtered <- leases_clean_cities %>%
+  semi_join(top_cities, by = c("state", "city")) %>%
+  mutate(period = case_when(
+    year %in% pre_covid_years ~ "pre",
+    year %in% post_covid_years ~ "post",
+    TRUE ~ NA_character_)) %>%
+  filter(!is.na(period))
+
+# One row per city/state/quarter, so each quarter counts once 
+# regardless of how many lease transactions happened in it
+filtered_quarterly <- filtered %>%
+  distinct(state, city, year, quarter, period, overall_rent)
+
+#average rent BEFORE COVID (2018–2019), per city
+avg_rent_pre <- filtered_quarterly %>%
+  filter(period == "pre") %>%
+  group_by(state, city) %>%
+  summarise(avg_rent_pre = mean(overall_rent, na.rm = TRUE), .groups = "drop")
+
+#average rent AFTER COVID (2022–2024), per city
+avg_rent_post <- filtered_quarterly %>%
+  filter(period == "post") %>%
+  group_by(state, city) %>%
+  summarise(avg_rent_post = mean(overall_rent, na.rm = TRUE), .groups = "drop")
+
+#combine and calculate growth rate
+growth_rates <- avg_rent_pre %>%
+  left_join(avg_rent_post, by = c("state", "city")) %>%
+  mutate(growth_rate_percent = 100 * (avg_rent_post - avg_rent_pre) / avg_rent_pre)
+
+#statistical significance (p-value)
+p_values <- filtered_quarterly %>%
+  group_by(state, city) %>%
+  summarise(
+    p_value = tryCatch(
+      tidy(t.test(overall_rent[period == "post"], overall_rent[period == "pre"]))$p.value,
+      error = function(e) NA),
+    .groups = "drop")
+
+#combine growth rate + p-value into one table
+rent_stats <- growth_rates %>%
+  left_join(p_values, by = c("state", "city")) %>%
+  arrange(desc(abs(growth_rate_percent))) %>%
+  slice_head(n = 24)
+
+#remove duplicate cities that share the same underlying market
+city_market_lookup <- leases_clean_cities %>%
+  distinct(state, city, market)
+
+rent_stats_deduped <- rent_stats %>%
+  left_join(city_market_lookup, by = c("state", "city")) %>%
+  left_join(top_cities %>% select(state, city, total_leasing), by=c("state", "city")) %>%
+  group_by(market) %>%
+  slice_max(total_leasing, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  arrange(desc(abs(growth_rate_percent)))
+
+print(rent_stats_deduped)
+```
+
+```{r, fig.width=8}
+# pick the top 10 for the chart, and highlight Austin
+top_growth_cities <- rent_stats_deduped %>%
+  arrange(desc(growth_rate_percent)) %>%
+  slice_head(n = 10) %>%
+  mutate(
+    city_label = paste0(city, ", ", state),
+    highlight = if_else(city == "Austin", "Austin", "Other"))
+
+# plot
+ggplot(top_growth_cities, aes(
+    x = reorder(city_label, growth_rate_percent),
+    y = growth_rate_percent,
+    fill = highlight)) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = paste0(round(growth_rate_percent, 1), "%")),
+            hjust = -0.15, size = 3.8) +
+  coord_flip() +
+  scale_fill_manual(values = c("Austin" = "#D55E00", "Other" = "#4E79A7")) +
+  scale_y_continuous(limits = c(0, max(top_growth_cities$growth_rate_percent) * 1.15),
+                      expand = expansion(mult = c(0, 0))) +
+  labs(
+    title = "Top Rent Growth City per Leading State Before vs After COVID",
+    subtitle = "% change in average rent, 2018–19 vs 2022–24",
+    x = NULL, y = "Rent growth (%)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position = "none",
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank())
+```
+
+# 2. Pre and Post-COVID Analysis of Leasing Activity (CBD vs Suburban)
+
+```{r, fig.width=8}
+library(stringr)
+library(scales)
+
+leases_clean_industry <- leases %>%
+  mutate(
+    COVIDPeriod = if_else(year < 2020, "Pre-COVID", "Post-COVID"),
+    Industry = case_when(
+      str_detect(str_to_lower(internal_industry), "tech|software|it") ~ "Tech",
+      str_detect(str_to_lower(internal_industry),"finance|bank|investment|financial|accounts")~"Finance",
+      str_detect(str_to_lower(internal_industry), "legal|law") ~ "Legal",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(Industry), !is.na(CBD_suburban), !is.na(leasedSF))
+
+suburban_table <- leases_clean_industry %>%
+  group_by(CBD_suburban, Industry, COVIDPeriod) %>%
+  summarise(TotalLeasedSF = sum(leasedSF, na.rm = TRUE), .groups = "drop") %>%
+  arrange(Industry, CBD_suburban, COVIDPeriod)
+
+# Plot
+ggplot(suburban_table, aes(x = CBD_suburban, y = TotalLeasedSF, fill = COVIDPeriod)) +
+  geom_col(position = "identity", alpha = 0.6, width = 0.7) +
+  geom_text(
+    aes(label = label_number(scale_cut = cut_short_scale())(TotalLeasedSF)),
+    position = position_identity(),
+    vjust = -0.5,
+    size = 3.5
+  ) +
+  facet_wrap(~ Industry, scales = "fixed") +
+  scale_y_continuous(labels = label_number(scale_cut = cut_short_scale())) +
+  scale_fill_manual(values = c("Pre-COVID" = "#000000", "Post-COVID" = "#2880B0")) +
+  labs(
+    title = "Pre and Post-COVID Analysis of Leasing Activity (CBD vs Suburban)",
+    subtitle = "Total square footage leased by industry and market type",
+    x = "Market Type",
+    y = "Total Leased Square Feet",
+    fill = "COVID Period"
+  ) +
+  theme_minimal(base_size = 13)
+
+```
+
+# 3. Tech Leasing in CBD/ Suburban Areas (Post-COVID)
+
+```{r, echo=FALSE, message=FALSE}
+library(ggplot2)
+
+cbd_vs_suburban <- leases_clean_industry %>%
+  filter(Industry == "Tech", COVIDPeriod == "Post-COVID", !is.na(state)) %>%
+  group_by(state, CBD_suburban) %>%
+  summarise(TotalLeasedSF = sum(leasedSF, na.rm = TRUE), .groups = "drop")
+
+# full names for states
+state_lookup <- setNames(state.name, state.abb)
+state_lookup["DC"] <- "Washington D.C."
+
+top_states <- cbd_vs_suburban %>%
+  group_by(state) %>%
+  summarise(Total = sum(TotalLeasedSF)) %>%
+  slice_max(Total, n = 8) %>%
+  pull(state)
+
+bar_data <- cbd_vs_suburban %>%
+  filter(state %in% top_states) %>%
+  mutate(StateFull = state_lookup[state])
+
+ggplot(bar_data, aes(x = reorder(StateFull, TotalLeasedSF), y = TotalLeasedSF, fill = CBD_suburban)) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  scale_y_continuous(labels = label_number(scale = 1e-6, suffix = "M")) +
+  scale_fill_manual(values = c("CBD" = "#54278F", "Suburban" = "#9E9AC8")) +
+  labs(
+    title = "Post-COVID Tech Leasing by State",
+    subtitle = "Top 8 states by total leased square footage",
+    x = NULL, y = "Sq Ft Leased", fill = NULL) +
+  theme_minimal(base_size = 13) +
+  theme(panel.grid.major.y = element_blank())+
+  theme(legend.position = "bottom")
+```
+
+# 4. Growth Rate Trend of Austin
+
+```{r, warning=FALSE, message=FALSE, fig.height=6,fig.width=6}
+library(wesanderson)
+
+austin_quarterly <- leases %>%
+  filter(city == "Austin") %>%
+  distinct(year, quarter, overall_rent)
+
+austin_data <- austin_quarterly %>%
+  group_by(year) %>%
+  summarize(avg_rent = mean(overall_rent, na.rm = TRUE)) %>%
+  arrange(year) %>%
+  mutate(
+    growth_rate = (avg_rent - lag(avg_rent)) / lag(avg_rent) * 100,
+    Period = case_when(
+      year < 2020 ~ "Before COVID",
+      year >= 2020 & year <= 2021 ~ "During COVID",
+      year >= 2022 ~ "After COVID"),
+    Period = factor(Period, levels = c("Before COVID", "During COVID", "After COVID")))
+
+# Prepare segment lines
+austin_segments <- austin_data %>%
+  arrange(year) %>%
+  mutate(
+    x = year,
+    xend = lead(year),
+    y = growth_rate,
+    yend = lead(growth_rate))
+
+# Plot
+ggplot(austin_segments) +
+  geom_segment(aes(x = x, xend = xend, y = y, yend = yend, color = Period), size = 1.5) +
+  geom_point(data = austin_data, aes(x = year, y = growth_rate, color = Period), size = 3) +
+  geom_text(data = austin_data,
+            aes(x = year, y = growth_rate, label = paste0(round(growth_rate, 1), "%")),
+            vjust = -1, size = 3.5) +
+  geom_vline(xintercept = 2020, linetype = "dotted", size = 0.5) +
+  geom_vline(xintercept = 2022, linetype = "dotted", size = 0.5) +
+  scale_color_manual(values = wes_palette("FantasticFox1")[1:3]) +
+  labs(title = "Growth Rate of Rent in Austin",
+       x = "Year", y = "Growth Rate (%)", color = "Period") +
+  scale_x_continuous(breaks = seq(min(austin_data$year), max(austin_data$year), by = 1)) +
+  theme_minimal()+
+  theme(legend.position = "bottom")
+```
